@@ -48,6 +48,22 @@ def _to_xy(lat: float, lon: float, lat0: float, lon0: float) -> tuple:
     return x, y
 
 
+def point_segment_distance_m(p: TrackPoint, a: TrackPoint, b: TrackPoint) -> float:
+    """点 p 到线段 ab 的水平最短距离（米）。
+
+    在 a 的局部切平面投影中计算，垂足落在线段外时收敛到较近端点；
+    a、b 重合（零长线段）时退化为 p 到 a 的距离。
+    """
+    bx, by = _to_xy(b.lat, b.lon, a.lat, a.lon)
+    px, py = _to_xy(p.lat, p.lon, a.lat, a.lon)
+    seg_len2 = bx * bx + by * by
+    if seg_len2 == 0.0:
+        return math.hypot(px, py)
+    t = (px * bx + py * by) / seg_len2
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - t * bx, py - t * by)
+
+
 def _inside(p: TrackPoint, circle: MaskCircle) -> bool:
     x, y = _to_xy(p.lat, p.lon, circle.lat, circle.lon)
     return x * x + y * y < circle.radius_m * circle.radius_m

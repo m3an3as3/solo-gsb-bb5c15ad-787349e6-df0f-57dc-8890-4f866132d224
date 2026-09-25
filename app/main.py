@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .drift import MAX_SPEED_MPS, MIN_OFFSET_M, fix_drift
 from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
 from .geo import MaskCircle, haversine_m, mask_track
 from .gpxutil import build_gpx, parse_gpx
@@ -46,6 +47,10 @@ class ElevationRequest(BaseModel):
     track_id: str
 
 
+class DriftRequest(BaseModel):
+    track_id: str
+
+
 def _point_dict(p):
     return {
         "lat": p.lat,
@@ -65,6 +70,13 @@ def _get_track(track_id: str):
 def _run_mask(track, circles_in):
     circles = [MaskCircle(lat=c.lat, lon=c.lon, radius_m=c.radius_m) for c in circles_in]
     return mask_track(track["segments"], circles)
+
+
+def _run_drift(track):
+    try:
+        return fix_drift(track["segments"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/", include_in_schema=False)
@@ -201,6 +213,54 @@ def elevation(req: ElevationRequest):
             for r in result.runs
         ],
     }
+
+
+def _hit_dict(h):
+    return {
+        "seg_index": h.seg_index,
+        "point_index": h.point_index,
+        "round": h.round,
+        "lat": h.point.lat,
+        "lon": h.point.lon,
+        "ele": h.point.ele,
+        "time": h.point.time.isoformat() if h.point.time else None,
+        "speed_in_mps": h.speed_in_mps,
+        "speed_out_mps": h.speed_out_mps,
+        "speed_direct_mps": h.speed_direct_mps,
+        "offset_m": h.offset_m,
+    }
+
+
+@app.post("/api/drift")
+def drift(req: DriftRequest):
+    """单点漂移检测：基于上传时保存的原始轨迹逐轮删除跳点，与遮蔽裁切、配速统计无关。"""
+    track = _get_track(req.track_id)
+    result = _run_drift(track)
+    return {
+        "hits": [_hit_dict(h) for h in result.hits],
+        "removed": len(result.hits),
+        "distance_before_m": result.distance_before_m,
+        "distance_after_m": result.distance_after_m,
+        "thresholds": {
+            "max_speed_mps": MAX_SPEED_MPS,
+            "min_offset_m": MIN_OFFSET_M,
+        },
+    }
+
+
+@app.post("/api/drift/export")
+def drift_export(req: DriftRequest):
+    """导出修复后的 GPX：删除全部命中跳点，保持原有 trkseg 结构（各段保留首尾点）。"""
+    track = _get_track(req.track_id)
+    result = _run_drift(track)
+    name = f"{track['name']}-fixed"
+    gpx_bytes = build_gpx(result.fixed_segments, name)
+    filename = quote(f"{name}.gpx")
+    return Response(
+        content=gpx_bytes,
+        media_type="application/gpx+xml",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
