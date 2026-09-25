@@ -10,6 +10,7 @@ const state = {
   circles: [],    // [{lat, lon, radius_m}]
   masked: null,   // /api/mask 返回结果
   elevation: null, // /api/elevation 返回结果
+  drift: null,    // /api/drift 返回结果
   transform: null,
 };
 
@@ -131,6 +132,11 @@ function draw() {
   const last = lastSeg && lastSeg[lastSeg.length - 1];
   if (first) drawMarker(first, "#2e7d32", "起", dpr);
   if (last) drawMarker(last, "#c62828", "终", dpr);
+
+  // 漂移跳点（橙色）
+  if (state.drift) {
+    for (const h of state.drift.hits) drawMarker(h, "#fb8c00", "漂", dpr);
+  }
 }
 
 function drawMarker(p, color, label, dpr) {
@@ -185,12 +191,15 @@ async function uploadFile(file) {
   state.circles = [];
   state.masked = null;
   state.elevation = null;
+  state.drift = null;
+  document.getElementById("download-fixed").disabled = true;
   computeTransform();
   renderTrackInfo(data.stats);
   renderCircleList();
   await refreshMask();
   await refreshPace();
   await refreshElevation();
+  await refreshDrift();
 }
 
 let paceTimer = null;
@@ -257,18 +266,61 @@ async function downloadGpx() {
       const data = await res.json();
       throw new Error(data.detail || "导出失败");
     }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${state.name || "track"}-masked.gpx`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    saveBlob(await res.blob(), `${state.name || "track"}-masked.gpx`);
   } catch (err) {
     showMessage(err.message);
   }
+}
+
+async function refreshDrift() {
+  if (!state.trackId) return;
+  const el = document.getElementById("drift");
+  try {
+    const res = await fetch("/api/drift", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: state.trackId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errDetail(data, "漂移检测失败"));
+    state.drift = data;
+    renderDrift(data);
+  } catch (err) {
+    state.drift = null;
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="pace-error">无法检测单点漂移：${escapeHtml(err.message)}</div>`;
+    document.getElementById("download-fixed").disabled = true;
+  }
+  draw();
+}
+
+async function downloadFixedGpx() {
+  if (!state.trackId) return;
+  try {
+    const res = await fetch("/api/drift/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: state.trackId }),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(errDetail(data, "导出失败"));
+    }
+    saveBlob(await res.blob(), `${state.name || "track"}-fixed.gpx`);
+  } catch (err) {
+    showMessage(err.message);
+  }
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /* ---------- 界面渲染 ---------- */
@@ -466,6 +518,36 @@ function renderStats(d) {
   document.getElementById("download").disabled = false;
 }
 
+function renderDrift(data) {
+  const el = document.getElementById("drift");
+  el.classList.remove("muted");
+  const savedKm = fmtKm(data.distance_before_m - data.distance_after_m);
+  let html =
+    `<div>命中跳点：<b>${data.hit_count}</b> 个` +
+    `（轨迹点 ${data.points_before} → ${data.points_after}）</div>` +
+    `<div>修复前里程：<b>${fmtKm(data.distance_before_m)} km</b></div>` +
+    `<div>修复后里程：<b>${fmtKm(data.distance_after_m)} km</b>（减少 ${savedKm} km）</div>`;
+  if (data.hits.length) {
+    const rows = data.hits.map((h, i) =>
+      "<tr>" +
+      `<td>${i + 1}</td>` +
+      `<td>分段${h.seg_index} · 第${h.point_index + 1}点</td>` +
+      `<td>${fmtTime(h.time)}</td>` +
+      `<td>${h.offset_m.toFixed(0)}</td>` +
+      `<td>${h.speed_in_mps.toFixed(1)} / ${h.speed_out_mps.toFixed(1)}</td>` +
+      `<td>${h.speed_bypass_mps.toFixed(1)}</td>` +
+      "</tr>"
+    ).join("");
+    html +=
+      '<table class="pace-table drift-table"><thead><tr>' +
+      "<th>序</th><th>位置</th><th>时间</th><th>偏移(m)</th>" +
+      "<th>进/出速度(m/s)</th><th>绕过速度(m/s)</th>" +
+      `</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  el.innerHTML = html;
+  document.getElementById("download-fixed").disabled = false;
+}
+
 function renderCircleList() {
   const ul = document.getElementById("circle-list");
   ul.innerHTML = "";
@@ -555,6 +637,7 @@ document.getElementById("clear-circles").addEventListener("click", () => {
 });
 
 document.getElementById("download").addEventListener("click", downloadGpx);
+document.getElementById("download-fixed").addEventListener("click", downloadFixedGpx);
 
 document.getElementById("split-km").addEventListener("input", schedulePace);
 document.getElementById("split-km").addEventListener("change", (e) => {

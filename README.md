@@ -1,6 +1,7 @@
 # 徒步轨迹分享 · 敏感地点遮蔽
 
-上传含时间的 GPX 轨迹，自动统计**分段配速**与**海拔剖面 / 累计爬升**；在**无底图**预览图上点击敏感地点（如家、公司）
+上传含时间的 GPX 轨迹，自动统计**分段配速**、**海拔剖面 / 累计爬升**并检测**单点漂移跳点**
+（可下载修复后的 GPX）；在**无底图**预览图上点击敏感地点（如家、公司）
 并设定遮蔽半径，系统按**轨迹线段与遮蔽圆的交点**精确裁切，导出为**互不连接的 GPX `trkseg`** 后再分享。
 
 - 后端：Python / FastAPI（几何裁切与配速统计在服务端完成）
@@ -37,11 +38,14 @@ docker compose up --build
    可修改后自动重算）列出每段的距离、耗时、分/公里配速与起止时间。
 3. **查看海拔剖面**：页面底部自动绘制**按里程展开的海拔曲线**，并给出**总爬升 / 总下降**
    与海拔范围；轨迹无海拔信息时显示"无海拔数据"。
-4. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
+4. **查看单点漂移修复**：页面自动检测**跳点**（GPS 单点漂移），命中点以橙色"漂"标记在
+   预览图上，并列出命中明细与**修复前 / 修复后里程**；点击"下载修复后的 GPX"得到删除
+   跳点后的轨迹。遮蔽裁切、配速与海拔统计始终使用**原始轨迹**，不受修复影响。
+5. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
    （添加前设定新圆半径；已有圆可在列表中单独修改或删除）。
-5. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
+6. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
    蓝色为可见轨迹，红色虚线为被隐藏段。
-6. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
+7. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
 
 ## 分段配速规则（实现要点）
 
@@ -68,6 +72,24 @@ docker compose up --build
 - **无海拔数据**：全程无任何有效海拔时接口返回 `has_ele=false`、爬升/下降为 `null`，
   页面显示"无海拔数据"而不是 0 米爬升。
 
+## 单点漂移修复规则（实现要点）
+
+- **按原始 trkseg 独立判定**：只考察同一 `trkseg` 内连续三点 A→B→C 中的中间点 B，
+  不跨分段边界拼合判定；每个 `trkseg` 的首尾点不参与判定，始终保留。
+- **跳点判定**（同时满足三条）：
+  1. 进出两段速度均超过 **12 米/秒**（A→B 与 B→C）；
+  2. 绕过该点的首尾速度不超过 **12 米/秒**（A→C）；
+  3. 该点到首尾线段 AC 的**水平最短距离**超过 **40 米**（局部切平面投影中计算）。
+- **时间校验**：`trkseg` 内相邻点时间必须严格递增；遇零时差或倒序，接口返回 400
+  并给出"第 N 个 trkseg 中第 i→i+1 个轨迹点的时间未递增"的明确提示。
+- **逐轮修复**：按原始点顺序扫描，每轮只删除**最早命中**的一个跳点，删除后以剩余点
+  重新计算，直到无命中；被删跳点不参与后续判定（可能使原本不满足条件的相邻点
+  在新一轮被判定）。
+- **修复结果独立**：修复只用于"单点漂移修复"区块的展示与修复后 GPX 导出；
+  遮蔽裁切、分段配速、海拔分析均继续使用上传时保存的原始轨迹。
+- **里程统计**：修复前 / 修复后里程均按 haversine 球面距离逐段累计，修复后里程
+  为删除全部命中跳点后的剩余轨迹里程。
+
 ## 裁切规则（实现要点）
 
 - **穿越识别**：对每个原始采样线段与每个遮蔽圆求解析交点（局部切平面投影中解二次方程），
@@ -84,13 +106,14 @@ docker compose up --build
 
 ```
 app/
-  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、静态页面
-  geo.py           # 几何核心：haversine、线段-圆求交、按可见性裁切
+  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/drift、/api/drift/export、静态页面
+  geo.py           # 几何核心：haversine、点到线段距离、线段-圆求交、按可见性裁切
   pace.py          # 分段配速：按固定里程切段、边界时间插值
   elevation.py     # 海拔剖面：20 米重采样、三点中位数、5 米反向确认峰谷、累计爬升/下降
+  drift.py         # 单点漂移：跳点判定（速度 + 偏移阈值）、逐轮删除最早命中点
   gpxutil.py       # GPX 1.1 解析（强制要求 time）与多 trkseg 导出
   static/          # 原生 JS 前端（index.html / app.js / style.css）
-tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）
+tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_drift.py（漂移 12 项）
 examples/sample.gpx# 示例轨迹（两个 trkseg，含时间与海拔）
 Dockerfile         # python:3.12-slim，构建期安装依赖，启动即运行
 docker-compose.yml # 单服务，映射 8000 端口
@@ -107,6 +130,7 @@ uvicorn app.main:app --reload --port 8000
 python3 tests/test_geo.py        # 裁切逻辑
 python3 tests/test_pace.py       # 分段配速
 python3 tests/test_elevation.py  # 海拔剖面与累计爬升
+python3 tests/test_drift.py      # 单点漂移检测与修复
 # 或：python3 -m pytest tests/
 ```
 
@@ -119,6 +143,8 @@ python3 tests/test_elevation.py  # 海拔剖面与累计爬升
 | `POST` | `/api/export` | 同上参数，返回多 `trkseg` 的 GPX 文件下载 |
 | `POST` | `/api/pace` | `{track_id, split_km?}` → 分段配速（见下） |
 | `POST` | `/api/elevation` | `{track_id}` → 海拔剖面与总爬升/总下降（见下） |
+| `POST` | `/api/drift` | `{track_id}` → 单点漂移检测结果与修复前后里程（见下） |
+| `POST` | `/api/drift/export` | `{track_id}` → 删除跳点后的 GPX 文件下载 |
 
 ### `POST /api/pace` 分段配速
 
@@ -151,6 +177,27 @@ curl -X POST http://localhost:8000/api/pace \
 
 ```bash
 curl -X POST http://localhost:8000/api/elevation \
+  -H "Content-Type: application/json" \
+  -d '{"track_id": "<上传返回的 track_id>"}'
+```
+
+### `POST /api/drift` 单点漂移检测与修复
+
+- **参数**：`track_id`（必填，上传返回值）。
+- **返回**：`hit_count`（命中跳点数）、`hits`（命中明细：原始 `seg_index` / `point_index`、
+  经纬度、时间、进/出/绕过速度 `speed_in_mps` / `speed_out_mps` / `speed_bypass_mps`、
+  到首尾线段距离 `offset_m`）、`distance_before_m` / `distance_after_m`（修复前后里程）、
+  `points_before` / `points_after`（修复前后轨迹点数）与 `thresholds`
+  （判定口径：`max_speed_mps=12`、`min_offset_m=40`）。
+- **错误**：轨迹相邻点时间未递增（零时差或倒序）时返回 `400` 与中文提示；
+  `track_id` 不存在返回 `404`。
+- **`POST /api/drift/export`**：参数相同，返回删除全部命中跳点后的 GPX 下载
+  （保留原始 `trkseg` 结构与每段首尾点，文件名为 `<轨迹名>-fixed.gpx`）。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/drift \
   -H "Content-Type: application/json" \
   -d '{"track_id": "<上传返回的 track_id>"}'
 ```

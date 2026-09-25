@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>徒步轨迹分享</h1>
-    <p>上传含时间的 GPX → 自动统计分段配速与海拔剖面 → 在预览图上点击敏感地点并设定遮蔽半径 → 导出按遮蔽圆裁切、互不连接的 GPX 分段</p>
+    <p>上传含时间的 GPX → 自动统计分段配速、海拔剖面并检测单点漂移跳点 → 在预览图上点击敏感地点并设定遮蔽半径 → 导出按遮蔽圆裁切、互不连接的 GPX 分段</p>
   </header>
   <main>
     <section class="panel">
@@ -37,6 +37,7 @@
         <span><i class="sw visible"></i>可见轨迹</span>
         <span><i class="sw hidden"></i>被隐藏段</span>
         <span><i class="sw circle"></i>遮蔽圆</span>
+        <span><i class="sw drift"></i>漂移跳点</span>
       </div>
     </section>
   </main>
@@ -55,6 +56,15 @@
     <div id="elevation-summary" class="info muted">上传含海拔的 GPX 后自动计算</div>
     <canvas id="profile"></canvas>
     <p class="hint">按里程每 20 米重采样，三点中位数抑制尖峰，5 米反向变化确认峰谷；缺失海拔处断开，不跨分段或缺口插值</p>
+  </section>
+
+  <section class="drift">
+    <h2>6. 单点漂移修复</h2>
+    <div id="drift" class="info muted">上传 GPX 后自动检测跳点</div>
+    <button id="download-fixed" disabled>下载修复后的 GPX</button>
+    <p class="hint">判定：同一 trkseg 内某中间点进出两段速度均 &gt; 12 m/s、绕过该点的首尾速度 ≤ 12 m/s、
+      且该点到首尾线段的水平距离 &gt; 40 m；逐轮只删最早命中的一个跳点并重算，保留每段首尾点；
+      命中点以橙色标在预览图上。遮蔽与配速统计仍使用原始轨迹，不受修复影响</p>
   </section>
 
   <div id="message" hidden></div>

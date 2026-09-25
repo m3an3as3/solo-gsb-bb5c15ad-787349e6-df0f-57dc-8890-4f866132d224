@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .drift import MAX_SPEED_MPS, MIN_OFFSET_M, fix_drift
 from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
 from .geo import MaskCircle, haversine_m, mask_track
 from .gpxutil import build_gpx, parse_gpx
@@ -43,6 +44,10 @@ class PaceRequest(BaseModel):
 
 
 class ElevationRequest(BaseModel):
+    track_id: str
+
+
+class DriftRequest(BaseModel):
     track_id: str
 
 
@@ -201,6 +206,62 @@ def elevation(req: ElevationRequest):
             for r in result.runs
         ],
     }
+
+
+def _hit_dict(h):
+    return {
+        "seg_index": h.seg_index,
+        "point_index": h.point_index,
+        "lat": h.lat,
+        "lon": h.lon,
+        "time": h.time.isoformat() if h.time else None,
+        "speed_in_mps": h.speed_in_mps,
+        "speed_out_mps": h.speed_out_mps,
+        "speed_bypass_mps": h.speed_bypass_mps,
+        "offset_m": h.offset_m,
+    }
+
+
+def _run_drift(track):
+    """对原始轨迹执行漂移修复；时间不递增时转为 400 明确提示。"""
+    try:
+        return fix_drift(track["segments"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/drift")
+def drift(req: DriftRequest):
+    """单点漂移检测与修复：基于上传时保存的原始轨迹计算，不影响遮蔽与配速。"""
+    track = _get_track(req.track_id)
+    result = _run_drift(track)
+    return {
+        "hit_count": len(result.hits),
+        "hits": [_hit_dict(h) for h in result.hits],
+        "distance_before_m": result.distance_before_m,
+        "distance_after_m": result.distance_after_m,
+        "points_before": sum(len(s) for s in track["segments"]),
+        "points_after": sum(len(s) for s in result.fixed_segments),
+        "thresholds": {
+            "max_speed_mps": MAX_SPEED_MPS,
+            "min_offset_m": MIN_OFFSET_M,
+        },
+    }
+
+
+@app.post("/api/drift/export")
+def drift_export(req: DriftRequest):
+    """导出修复后的 GPX：删除全部命中跳点，保留原始 trkseg 结构与首尾点。"""
+    track = _get_track(req.track_id)
+    result = _run_drift(track)
+    name = f"{track['name']}-fixed"
+    gpx_bytes = build_gpx(result.fixed_segments, name)
+    filename = quote(f"{name}.gpx")
+    return Response(
+        content=gpx_bytes,
+        media_type="application/gpx+xml",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
